@@ -1,2 +1,2 @@
-# bot-discord-integrado
-Bot que me permite gestionar uno o varios servidores de Discord
+# configurar-server-discord
+Programa que me permite gestionar uno o varios servidores de Discord
