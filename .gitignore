@@ -221,3 +221,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Discord Server Studio ---
+_testdata*/
+DSS_HOME/
+release/
+*.log
+capturas/_*.png
+# Credenciales locales si DSS_HOME apunta al repositorio
+bot_token.dat
+session.dat
+settings.json
