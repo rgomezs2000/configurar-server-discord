@@ -121,6 +121,7 @@ class User:
     bot: bool = False
     system: bool = False
     premium_type: int = 0
+    created_at: datetime | None = None
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "User":
@@ -134,6 +135,7 @@ class User:
             bot=bool(data.get("bot")),
             system=bool(data.get("system")),
             premium_type=int(data.get("premium_type") or 0),
+            created_at=parse_ts(data.get("created_at")),
         )
 
     @property
@@ -768,6 +770,7 @@ class Message:
     pinned: bool = False
     type: int = 0
     attachments: list[Attachment] = field(default_factory=list)
+    embeds: list[dict] = field(default_factory=list)
     mentions: list[User] = field(default_factory=list)
 
     @classmethod
@@ -781,6 +784,7 @@ class Message:
             pinned=bool(data.get("pinned")),
             type=int(data.get("type") or 0),
             attachments=[Attachment.from_dict(a) for a in (data.get("attachments") or [])],
+            embeds=list(data.get("embeds") or []),
             mentions=[User.from_dict(u) for u in (data.get("mentions") or [])],
         )
 
@@ -791,6 +795,8 @@ class Message:
             text = text[:157] + "…"
         if not text and self.attachments:
             text = "📎 " + ", ".join(a.filename for a in self.attachments[:3])
+        if not text and self.embeds:
+            text = "🧩 Embed"
         return text or "(sin contenido)"
 
 

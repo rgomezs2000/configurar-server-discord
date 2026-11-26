@@ -8,6 +8,7 @@ from typing import Any
 
 from ...constants import (CREATABLE_CHANNEL_TYPES, CHANNEL_GLYPHS,
                           creatable_channel_types)
+from ...font_styles import STYLE_NAMES, apply_font_style
 from ...models import Channel, Invite, PermissionOverwrite, Webhook, bits
 from ...util import normalize_channel_name, safe_int
 from ..emoji_picker import EmojiPicker
@@ -46,10 +47,8 @@ SLUG_CHANNEL_TYPES = {0, 5, 15}  # texto, anuncios, foro
 
 
 def _channel_name(channel: Channel, raw: str) -> str:
-    """Categorías y voz/escenario conservan el texto; texto/foro/anuncios se normalizan."""
-    if channel.is_category or channel.type not in SLUG_CHANNEL_TYPES:
-        return raw.strip()
-    return normalize_channel_name(raw, keep_emoji=True)
+    """Todos los canales conservan el texto tal cual, incluidos espacios extremos."""
+    return raw
 
 
 class ChannelsPage(Page):
@@ -166,7 +165,7 @@ class ChannelsPage(Page):
             return False
 
     def _dirty_fields(self, channel: Channel) -> bool:
-        if self.name_var.get().strip() != (channel.name or ""):
+        if self.name_var.get() != (channel.name or ""):
             return True
         if not channel.is_category:
             parent = next((c.name for c in self._channels
@@ -334,6 +333,18 @@ class ChannelsPage(Page):
         self.name_var = tk.StringVar(value=channel.name or "")
         name_entry = ttk.Entry(name_field.slot, textvariable=self.name_var)
         name_field.add(name_entry)
+
+        font_field = Field(body, "Tipografía del nombre",
+                           "Convierte el texto a caracteres Unicode tipo Discord.")
+        font_field.pack(fill="x", pady=(0, 12))
+        self.detail_font_var = tk.StringVar(value="Normal")
+        detail_font = ttk.Combobox(font_field.slot, values=STYLE_NAMES,
+                                   state="readonly", textvariable=self.detail_font_var)
+        font_field.add(detail_font)
+        detail_font.bind("<<ComboboxSelected>>", lambda _e: self._apply_detail_font())
+        self._detail_font_source = channel.name or ""
+        self._detail_font_internal = False
+        self.name_var.trace_add("write", self._detail_name_changed)
 
         categories = ["Sin categoría"] + [c.name or "" for c in self._channels if c.is_category]
         self.category_map = {c.name: c.id for c in self._channels if c.is_category}
@@ -973,12 +984,26 @@ class ChannelsPage(Page):
         except tk.TclError:
             pass
 
+    def _detail_name_changed(self, *_args: Any) -> None:
+        if getattr(self, "_detail_font_internal", False):
+            return
+        self._detail_font_source = self.name_var.get()
+
+    def _apply_detail_font(self) -> None:
+        source = self._detail_font_source or self.name_var.get()
+        converted = apply_font_style(source, self.detail_font_var.get())
+        self._detail_font_internal = True
+        try:
+            self.name_var.set(converted)
+        finally:
+            self._detail_font_internal = False
+
     def _save(self, channel: Channel) -> None:
         if not self.require("MANAGE_CHANNELS", "editar canales"):
             return
         raw_name = self.name_var.get()
         name = _channel_name(channel, raw_name)
-        if not name:
+        if not name.strip():
             self.toast_warn("El nombre del canal no puede quedar vacío.")
             return
         fields: dict[str, Any] = {"name": name}
@@ -1012,8 +1037,7 @@ class ChannelsPage(Page):
         if not self.require("MANAGE_CHANNELS", "eliminar canales"):
             return
         client = self.app.client
-        shown = (channel.display_name if channel.is_category
-                 else normalize_channel_name(channel.display_name, keep_emoji=True))
+        shown = channel.display_name
         required = shown
         dialog = ConfirmDialog(self, "Eliminar canal",
                                f"Se eliminará «{shown}» y todos sus mensajes. "
@@ -1116,6 +1140,18 @@ class ChannelCreateModal(Modal):
         name_field.add(entry)
         entry.focus_set()
 
+        font_field = Field(body, "Tipografía del nombre",
+                           "Escribe el nombre y elige un estilo Unicode.")
+        font_field.pack(fill="x", pady=(0, 12))
+        self.font_var = tk.StringVar(value="Normal")
+        font_combo = ttk.Combobox(font_field.slot, values=STYLE_NAMES,
+                                  state="readonly", textvariable=self.font_var)
+        font_field.add(font_combo)
+        font_combo.bind("<<ComboboxSelected>>", lambda _e: self._apply_font())
+        self._font_source = ""
+        self._font_internal = False
+        self.name_var.trace_add("write", self._name_changed)
+
         if not category_only:
             type_field = Field(body, "Tipo de canal", bg=C.CARD)
             type_field.pack(fill="x", pady=(0, 12))
@@ -1147,21 +1183,31 @@ class ChannelCreateModal(Modal):
         self.add_button("Cancelar", self.close)
         self.add_button("Crear", self._submit, style="Accent.TButton")
 
+    def _name_changed(self, *_args: Any) -> None:
+        if getattr(self, "_font_internal", False):
+            return
+        self._font_source = self.name_var.get()
+
+    def _apply_font(self) -> None:
+        source = self._font_source or self.name_var.get()
+        converted = apply_font_style(source, self.font_var.get())
+        self._font_internal = True
+        try:
+            self.name_var.set(converted)
+        finally:
+            self._font_internal = False
+
     def _submit(self) -> None:
         raw_name = self.name_var.get()
         if self._category_only:
-            name = raw_name.strip()
+            name = raw_name
             error = "El nombre de la categoría no puede quedar vacío."
         else:
             type_value = next((value for value, label in self._types
                                if label == self.type_var.get()), 0)
-            name = (normalize_channel_name(raw_name, keep_emoji=True)
-                    if type_value in SLUG_CHANNEL_TYPES else raw_name.strip())
-            error = ("Usa letras, números, guiones y emojis; los espacios se "
-                     "convierten en «-»."
-                     if type_value in SLUG_CHANNEL_TYPES
-                     else "El nombre del canal no puede quedar vacío.")
-        if not name:
+            name = raw_name
+            error = "El nombre del canal no puede quedar vacío."
+        if not name.strip():
             self.show_error(error)
             return
         fields: dict[str, Any] = {"name": name}

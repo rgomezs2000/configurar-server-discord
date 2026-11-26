@@ -433,12 +433,13 @@ La app no intenta saltarse los permisos de Discord: los respeta y los refleja.
 
 ### Nombres de canal
 
-- **Todos los canales** aceptan **emojis Unicode** en el nombre.
-- **Categorías** y canales de **voz/escenario**: conservan mayúsculas, espacios, signos y emojis.
-- **Texto, foro y anuncios**: minúsculas, espacios a `-`, se quitan acentos/símbolos no emoji
-  y se conservan letras, números, guiones y emojis.
-- **Anuncios y foros** requieren **Comunidad** activa; sin ella solo se ofrecen texto y voz.
-- El nombre se normaliza al crear o guardar, tanto en el editor como en el JSON masivo.
+- **Todos los canales y categorías** conservan el nombre tal cual se escribe: mayúsculas,
+  minúsculas, espacios, signos como `|`, emojis, acentos y **tipografías Unicode** (negrita,
+  cursiva, letra gótica, ancho completo, etc., como las que genera Glyphy).
+- No se convierten espacios en guiones ni se eliminan símbolos.
+- Discord sigue validando el nombre (longitud, caracteres no permitidos); si lo rechaza, la app
+  muestra el error.
+- El nombre se conserva al crear, editar, importar por JSON y generar la estructura.
 
 ### Selector de emojis
 

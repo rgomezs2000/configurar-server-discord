@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import tkinter as tk
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from tkinter import ttk
 from typing import Any
 
-from ...constants import TIMEOUT_PRESETS
-from ...models import Member, fmt_date, fmt_relative
+from ...constants import DELETE_MESSAGE_WINDOWS, TIMEOUT_PRESETS
+from ...models import Member, fmt_date, fmt_datetime, fmt_relative, snowflake_time
 from ...util import plural
 from ..theme import C
 from ..widgets import (Avatar, Checkbox, ConfirmDialog, EmptyState, Field, Modal,
@@ -49,21 +50,66 @@ class MembersPage(Page):
                                       command=lambda: self._load(first=False))
         self.more_button.pack(side="right")
         self.more_button.configure(state="disabled")
+        self.ban_button = ttk.Button(toolbar, text="Banear", style="SmallDanger.TButton",
+                                     command=lambda: self._bulk_action("ban"))
+        self.ban_button.pack(side="right", padx=(0, 6))
+        Tooltip(self.ban_button, "Banear seleccionados · Ctrl+3")
+        self.kick_button = ttk.Button(toolbar, text="Expulsar", style="SmallDanger.TButton",
+                                      command=lambda: self._bulk_action("kick"))
+        self.kick_button.pack(side="right", padx=(0, 6))
+        Tooltip(self.kick_button, "Expulsar seleccionados · Ctrl+2")
+        self.timeout_button = ttk.Button(toolbar, text="Suspender", style="SmallDanger.TButton",
+                                         command=lambda: self._bulk_action("timeout"))
+        self.timeout_button.pack(side="right", padx=(0, 6))
+        Tooltip(self.timeout_button, "Suspender seleccionados · Ctrl+1")
         self.loading_label = tk.Label(toolbar, text="", bg=C.CONTENT, fg=C.FAINT,
                                       font=app.theme.font(8))
         self.loading_label.pack(side="right", padx=(0, 10))
+        if not app.can("BAN_MEMBERS"):
+            self.ban_button.configure(state="disabled")
+        if not app.can("KICK_MEMBERS"):
+            self.kick_button.configure(state="disabled")
+        if not app.can("MODERATE_MEMBERS"):
+            self.timeout_button.configure(state="disabled")
 
         columns = [
-            TableColumn("user", "Usuario", 190, stretch=True),
-            TableColumn("nick", "Apodo", 150),
-            TableColumn("roles", "Roles", 240, stretch=True),
-            TableColumn("joined", "Se unió", 110),
-            TableColumn("status", "Estado", 150),
+            TableColumn("user", "Usuario", 180, stretch=True),
+            TableColumn("nick", "Apodo", 130),
+            TableColumn("roles", "Roles", 220, stretch=True),
+            TableColumn("joined", "Se unió al servidor", 140),
+            TableColumn("discord", "Se unió a Discord", 140),
+            TableColumn("status", "Estado", 120),
         ]
         self.table = Table(self, columns, height=18, on_double=self._open_member,
-                           multi=False, theme=app.theme,
+                           multi=True, theme=app.theme,
                            empty_text="No hay miembros que coincidan con el filtro.")
         self.table.pack(fill="both", expand=True, padx=28, pady=(0, 22))
+        self._member_anchor: str | None = None
+        self.table.tree.bind("<ButtonPress-1>", self._member_press)
+        self.table.tree.bind("<Shift-Up>", lambda _e: self._member_extend(-1))
+        self.table.tree.bind("<Shift-Down>", lambda _e: self._member_extend(1))
+        self.table.tree.bind("<Shift-Prior>", lambda _e: self._member_extend(-18))
+        self.table.tree.bind("<Shift-Next>", lambda _e: self._member_extend(18))
+        self.table.tree.bind("<Control-Key-1>",
+                             lambda _e: self._bulk_action("timeout"))
+        self.table.tree.bind("<Control-Key-2>",
+                             lambda _e: self._bulk_action("kick"))
+        self.table.tree.bind("<Control-Key-3>",
+                             lambda _e: self._bulk_action("ban"))
+        self.table.tree.unbind("<Button-3>")
+        self.table.tree.bind("<Button-3>", self._member_context)
+        self._member_menu = tk.Menu(self, tearoff=0, bg=C.CARD, fg=C.TEXT,
+                                    activebackground=C.ACCENT_SOFT,
+                                    activeforeground=C.TEXT)
+        self._member_menu.add_command(label="Ver ficha", command=self._context_profile)
+        self._member_menu.add_command(label="Copiar ID", command=self._context_copy_id)
+        self._member_menu.add_separator()
+        self._member_menu.add_command(label="Suspender",
+                                      command=lambda: self._bulk_action("timeout"))
+        self._member_menu.add_command(label="Expulsar",
+                                      command=lambda: self._bulk_action("kick"))
+        self._member_menu.add_command(label="Banear",
+                                      command=lambda: self._bulk_action("ban"))
 
         self._members: list[Member] = []
         self._after: str | None = None
@@ -201,6 +247,8 @@ class MembersPage(Page):
                 "roles": ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
                          if names else "—",
                 "joined": fmt_date(member.joined_at),
+                "discord": fmt_date(member.user.created_at
+                                    or snowflake_time(member.user.id)),
                 "status": status,
                 "_tags": tags,
                 "_raw": {"user": member.user.display_name, "joined": member.joined_at,
@@ -220,6 +268,107 @@ class MembersPage(Page):
         if member is None:
             return
         MemberModal(self, self.app, self, member).show()
+
+    def _selected_members(self) -> list[Member]:
+        return [row["_member"] for row in self.table.selected_rows()
+                if row.get("_member") is not None]
+
+    def _member_press(self, event: tk.Event) -> str | None:
+        row_id = self.table.tree.identify_row(event.y)
+        if not row_id:
+            return None
+        ctrl = bool(event.state & 0x0004)
+        shift = bool(event.state & 0x0001)
+        if ctrl:
+            selected = set(self.table.tree.selection())
+            if row_id in selected:
+                selected.discard(row_id)
+            else:
+                selected.add(row_id)
+            self._member_set_selection(selected)
+            self.table.tree.focus(row_id)
+            return "break"
+        if shift:
+            selected = set(self.table.tree.selection())
+            if row_id in selected:
+                selected.discard(row_id)
+                self._member_set_selection(selected)
+                return "break"
+            rows = list(self.table.tree.get_children())
+            anchor = self._member_anchor if self._member_anchor in rows else row_id
+            low, high = sorted((rows.index(anchor), rows.index(row_id)))
+            self._member_set_selection(set(rows[low:high + 1]))
+            self.table.tree.focus(row_id)
+            return "break"
+        self._member_anchor = row_id
+        return None
+
+    def _member_set_selection(self, selected: set[str]) -> None:
+        rows = list(self.table.tree.get_children())
+        ordered = [row for row in rows if row in selected]
+        if ordered:
+            self.table.tree.selection_set(*ordered)
+        else:
+            current = self.table.tree.selection()
+            if current:
+                self.table.tree.selection_remove(*current)
+
+    def _member_extend(self, delta: int) -> str:
+        rows = list(self.table.tree.get_children())
+        if not rows:
+            return "break"
+        focus = self.table.tree.focus()
+        if focus not in rows:
+            focus = self._member_anchor if self._member_anchor in rows else rows[0]
+        anchor = self._member_anchor if self._member_anchor in rows else focus
+        target = max(0, min(rows.index(focus) + delta, len(rows) - 1))
+        low, high = sorted((rows.index(anchor), target))
+        self._member_set_selection(set(rows[low:high + 1]))
+        self.table.tree.focus(rows[target])
+        self.table.tree.see(rows[target])
+        return "break"
+
+    def _member_context(self, event: tk.Event) -> None:
+        row_id = self.table.tree.identify_row(event.y)
+        if not row_id:
+            return
+        if row_id not in self.table.tree.selection():
+            self.table.tree.selection_set(row_id)
+        self.table.tree.focus(row_id)
+        self._member_anchor = row_id
+        selected = len(self.table.tree.selection())
+        self._member_menu.entryconfigure(0, label=("Ver ficha" if selected <= 1
+                                                   else f"Ver ficha del primero"))
+        try:
+            self._member_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self._member_menu.grab_release()
+            except tk.TclError:
+                pass
+
+    def _context_profile(self) -> None:
+        members = self._selected_members()
+        if members:
+            MemberModal(self, self.app, self, members[0]).show()
+
+    def _context_copy_id(self) -> None:
+        members = self._selected_members()
+        if not members:
+            return
+        copy_to_clipboard(self, "\n".join(member.user.id for member in members))
+        self.app.toasts.show(f"{len(members)} ID(s) copiados.", "success")
+
+    def _bulk_action(self, mode: str) -> None:
+        members = self._selected_members()
+        if not members:
+            self.toast_warn("Selecciona uno o varios miembros.")
+            return
+        permission = {"timeout": "MODERATE_MEMBERS", "kick": "KICK_MEMBERS",
+                      "ban": "BAN_MEMBERS"}[mode]
+        if not self.require(permission, f"la acción «{mode}»"):
+            return
+        MemberBulkActionModal(self, self.app, self, members, mode).show()
 
 
 # --------------------------------------------------------------------------- #
@@ -257,6 +406,10 @@ class MemberModal(Modal):
                  font=app.theme.font(14, "bold"), anchor="w").pack(fill="x")
         tk.Label(info, text=f"{member.user.tag}  ·  ID {member.user.id}",
                  bg=C.CARD, fg=C.MUTED, font=(app.theme.mono_family, 8), anchor="w").pack(fill="x")
+        created = member.user.created_at or snowflake_time(member.user.id)
+        tk.Label(info, text=f"Se unió a Discord: {fmt_datetime(created)}  ·  "
+                            f"Al servidor: {fmt_datetime(member.joined_at)}",
+                 bg=C.CARD, fg=C.MUTED, font=app.theme.font(8), anchor="w").pack(fill="x")
         chips = tk.Frame(info, bg=C.CARD)
         chips.pack(fill="x", pady=(4, 0))
         if member.user.bot:
@@ -336,6 +489,8 @@ class MemberModal(Modal):
         for text, command, enabled in (
             ("Expulsar", self._kick, self.can_kick),
             ("Banear", self._ban, self.can_ban),
+            ("Avatar", self._avatar, True),
+            ("Registros", self._records, True),
             ("Enviar MD", self._dm, True),
         ):
             button = ttk.Button(actions, text=text, style="SmallDanger.TButton" if text != "Enviar MD" else "Small.TButton",
@@ -460,5 +615,130 @@ class MemberModal(Modal):
         self.app.refresh_guild()
         self.close()
 
+    def _avatar(self) -> None:
+        if self.member.user.avatar_url:
+            webbrowser.open(self.member.user.avatar_url)
+
+    def _records(self) -> None:
+        MemberRecordsModal(self, self.app, self.member).show()
+
     def _dm(self) -> None:
         DirectMessageModal(self, self.app, self.member.user.id, self.member.display_name)
+
+
+class MemberRecordsModal(Modal):
+    def __init__(self, parent: tk.Misc, app: Any, member: Member):
+        super().__init__(parent, f"Registros de {member.display_name}", width=760,
+                         theme=app.theme,
+                         subtitle="Acciones de auditoría que tuvieron a este usuario como objetivo.")
+        self.app = app
+        self.member = member
+        columns = [TableColumn("date", "Fecha", 140),
+                   TableColumn("action", "Acción", 220, stretch=True),
+                   TableColumn("actor", "Moderador", 150),
+                   TableColumn("reason", "Motivo", 240, stretch=True)]
+        self.table = Table(self.body, columns, height=16, theme=app.theme,
+                           empty_text="Sin registros de auditoría para este usuario.")
+        self.table.pack(fill="both", expand=True)
+        self.status = tk.Label(self.body, text="Cargando…", bg=C.CARD, fg=C.MUTED,
+                               font=app.theme.font(8), anchor="w")
+        self.status.pack(fill="x", pady=(6, 0))
+        self.add_button("Cerrar", self.close)
+        self._load()
+
+    def _load(self) -> None:
+        def work() -> list[Any]:
+            return self.app.client.list_audit_logs(self.app.guild.id, limit=100)
+
+        def done(entries: list[Any]) -> None:
+            selected = [entry for entry in entries
+                        if str(entry.target_id or "") == self.member.user.id]
+            self.table.set_rows([{
+                "_id": entry.id,
+                "date": fmt_datetime(entry.created_at),
+                "action": entry.action_label,
+                "actor": entry.actor.display_name if entry.actor else "Sistema",
+                "reason": entry.reason or "—",
+            } for entry in selected])
+            self.status.configure(text=f"{len(selected)} registros.", fg=C.MUTED)
+
+        self.app.run_task(work, done, lambda error: self.status.configure(
+            text=str(error), fg=C.RED))
+
+
+class MemberBulkActionModal(Modal):
+    def __init__(self, parent: tk.Misc, app: Any, page: MembersPage,
+                 members: list[Member], mode: str):
+        labels = {"timeout": "Suspender", "kick": "Expulsar", "ban": "Banear"}
+        super().__init__(parent, f"{labels[mode]} {len(members)} miembro(s)",
+                         width=560, theme=app.theme,
+                         subtitle="La acción se aplicará a todos los seleccionados.")
+        self.app = app
+        self.page = page
+        self.members = members
+        self.mode = mode
+        body = self.body
+        tk.Label(body, text="MOTIVO", bg=C.CARD, fg=C.MUTED,
+                 font=app.theme.font(8, "bold"), anchor="w").pack(fill="x")
+        self.reason_text = tk.Text(
+            body, height=3, bg=C.INPUT, fg=C.TEXT, insertbackground=C.TEXT,
+            relief="flat", bd=0, highlightthickness=1,
+            highlightbackground=C.BORDER, font=app.theme.font(9),
+            wrap="word", padx=8, pady=6)
+        self.reason_text.pack(fill="x", pady=(2, 10))
+        self.delete_var = tk.StringVar(value=DELETE_MESSAGE_WINDOWS[0][1])
+        self.timeout_var = tk.StringVar(value=TIMEOUT_PRESETS[2][0])
+        if mode == "ban":
+            tk.Label(body, text="BORRAR MENSAJES", bg=C.CARD, fg=C.MUTED,
+                     font=app.theme.font(8, "bold"), anchor="w").pack(fill="x")
+            ttk.Combobox(body, values=[label for _v, label in DELETE_MESSAGE_WINDOWS],
+                         state="readonly", textvariable=self.delete_var).pack(
+                fill="x", pady=(2, 0))
+        elif mode == "timeout":
+            tk.Label(body, text="DURACIÓN DEL AISLAMIENTO", bg=C.CARD, fg=C.MUTED,
+                     font=app.theme.font(8, "bold"), anchor="w").pack(fill="x")
+            ttk.Combobox(body, values=[label for label, _s in TIMEOUT_PRESETS],
+                         state="readonly", textvariable=self.timeout_var).pack(
+                fill="x", pady=(2, 0))
+        self.add_button("Cancelar", self.close)
+        self.add_button(labels[mode], self._submit,
+                        style="Danger.TButton" if mode != "timeout" else "Accent.TButton")
+
+    def _submit(self) -> None:
+        reason = self.reason_text.get("1.0", "end").strip() or None
+        delete_seconds = next((value for value, label in DELETE_MESSAGE_WINDOWS
+                               if label == self.delete_var.get()), 0)
+        seconds = next((value for label, value in TIMEOUT_PRESETS
+                        if label == self.timeout_var.get()), 600)
+        until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        client = self.app.client
+        guild_id = self.app.guild.id
+        members = self.members
+        mode = self.mode
+        self.set_busy(True)
+
+        def work() -> int:
+            for member in members:
+                if mode == "ban":
+                    client.ban_member(guild_id, member.user.id, delete_seconds, reason)
+                elif mode == "kick":
+                    client.kick_member(guild_id, member.user.id, reason)
+                else:
+                    client.update_member(
+                        guild_id, member.user.id,
+                        {"communication_disabled_until":
+                         until.isoformat(timespec="seconds").replace("+00:00", "Z")},
+                        reason=reason)
+            return len(members)
+
+        def done(count: int) -> None:
+            self.app.toasts.show(f"{count} miembros actualizados.", "success")
+            self.page.refresh()
+            self.app.refresh_guild()
+            self.close()
+
+        def failed(error: BaseException) -> None:
+            self.set_busy(False)
+            self.show_error(str(error))
+
+        self.app.run_task(work, done, failed)

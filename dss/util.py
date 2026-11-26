@@ -21,7 +21,7 @@ ALLOWED_IMAGE_MIME = {
     ".webp": "image/webp",
 }
 
-_CHANNEL_ALLOWED = set("abcdefghijklmnopqrstuvwxyz0123456789-_")
+_CHANNEL_ALLOWED = set("abcdefghijklmnopqrstuvwxyz0123456789-_|")
 _CHANNEL_INVALID_RUN = re.compile(r"-{2,}")
 
 
@@ -39,9 +39,9 @@ def normalize_channel_name(value: str, *, strip: bool = True,
                            keep_emoji: bool = False) -> str:
     """Convierte un nombre de canal al formato de Discord.
 
-    Minúsculas, espacios a guiones, sin acentos y solo letras, números, guiones.
-    Con ``keep_emoji`` conserva emojis Unicode; con ``strip=False`` no elimina
-    guiones de los extremos.
+    Minúsculas, espacios a guiones, sin acentos y solo letras, números, guiones
+    y el separador ``|``. Con ``keep_emoji`` conserva emojis Unicode; con
+    ``strip=False`` no elimina guiones de los extremos.
     """
     text = unicodedata.normalize("NFKD", (value or "").strip().lower())
     text = "".join(ch for ch in text if not unicodedata.combining(ch))

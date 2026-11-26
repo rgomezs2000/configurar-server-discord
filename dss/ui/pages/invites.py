@@ -83,7 +83,18 @@ class InvitesPage(Page):
         self.table = Table(self, columns, height=14, theme=app.theme, multi=True,
                            empty_text="No hay invitaciones activas.")
         self.table.pack(fill="both", expand=True, padx=28, pady=(0, 20))
+        self.table.tree.bind("<Double-1>", self._open_detail)
         self._invites: list[Invite] = []
+
+    def _open_detail(self, event: tk.Event) -> None:
+        row_id = self.table.tree.identify_row(event.y)
+        if not row_id:
+            return
+        row = next((item for item in self.table._rows
+                    if str(item.get("_id")) == row_id), None)
+        if row is None or row.get("_invite") is None:
+            return
+        InviteDetailWindow(self, self.app, row["_invite"])
 
     def _text_channels(self) -> list[str]:
         return [f"#{c.display_name}" for c in self.app.channels if c.is_text]
@@ -178,3 +189,54 @@ class InvitesPage(Page):
             self.refresh()
 
         self.run(work, done)
+
+
+class InviteDetailWindow(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, app: Any, invite: Invite):
+        super().__init__(parent)
+        self.app = app
+        self.invite = invite
+        self.title(f"Invitación {invite.code}")
+        self.geometry("560x430")
+        self.configure(bg=C.CONTENT)
+        self.transient(parent.winfo_toplevel())
+        self._build()
+
+    def _build(self) -> None:
+        tk.Label(self, text=f"Invitación discord.gg/{self.invite.code}",
+                 bg=C.CONTENT, fg=C.TEXT, font=self.app.theme.font(13, "bold"),
+                 anchor="w").pack(fill="x", padx=18, pady=(16, 4))
+        card = Card(self, padding=14)
+        card.pack(fill="x", padx=18, pady=(4, 8))
+        for label, value in (
+                ("Canal", f"#{self.invite.channel_name}" if self.invite.channel_name else "—"),
+                ("Creador", self.invite.inviter.display_name
+                 if self.invite.inviter else "—"),
+                ("Creada", fmt_datetime(self.invite.created_at)),
+                ("Expira", self.invite.expires_label),
+                ("Usos", self.invite.uses_label),
+                ("Solo miembros nuevos", "Sí" if self.invite.temporary else "No")):
+            row = tk.Frame(card.body, bg=C.CARD)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=label, bg=C.CARD, fg=C.MUTED,
+                     font=self.app.theme.font(9), width=20, anchor="w").pack(side="left")
+            tk.Label(row, text=value, bg=C.CARD, fg=C.TEXT,
+                     font=self.app.theme.font(9), anchor="w").pack(
+                side="left", fill="x", expand=True)
+        tk.Label(self,
+                 text="Discord no expone la lista nominal de usuarios que usaron "
+                      "una invitación. Solo informa el número de usos.",
+                 bg=C.CARD_ALT, fg=C.MUTED, font=self.app.theme.font(8),
+                 anchor="w", justify="left", wraplength=500).pack(
+            fill="x", padx=18, pady=(4, 8))
+        actions = tk.Frame(self, bg=C.CONTENT)
+        actions.pack(fill="x", padx=18, pady=(0, 14))
+        ttk.Button(actions, text="Copiar enlace", style="SmallAccent.TButton",
+                   command=self._copy).pack(side="left")
+        ttk.Button(actions, text="Cerrar", style="Small.TButton",
+                   command=self.destroy).pack(side="right")
+
+    def _copy(self) -> None:
+        url = f"https://discord.gg/{self.invite.code}"
+        copy_to_clipboard(self, url)
+        self.app.toasts.show(f"Enlace copiado: {url}", "success")

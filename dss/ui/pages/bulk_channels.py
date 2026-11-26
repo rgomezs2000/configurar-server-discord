@@ -11,7 +11,6 @@ from typing import Any
 
 from ...models import Channel
 from ...constants import PERMISSION_BY_KEY
-from ...util import normalize_channel_name
 from ..theme import C
 from ..widgets import Modal, Table, TableColumn
 from .bulk_json_nav import clean_json_text, load_clipboard_object, source_block
@@ -272,10 +271,10 @@ class BulkChannelsTab(tk.Frame):
             if not isinstance(category, dict):
                 raise ValueError(f"categories[{index}] debe ser objeto.")
             action = str(category.get("action") or ("view" if snapshot else "create"))
-            name = str(category.get("name") or "").strip()
+            name = str(category.get("name") or "")
             category_id = str(category.get("categoryId") or f"__category_{index}")
             if action == "create":
-                valid = bool(name)
+                valid = bool(name.strip())
             else:
                 valid = action in ACTIONS and bool(category.get("categoryId"))
             ops.append({"source": f"categories[{index}]", "action": action,
@@ -289,14 +288,12 @@ class BulkChannelsTab(tk.Frame):
                 if not isinstance(child, dict):
                     continue
                 child_action = str(child.get("action") or ("view" if snapshot else "create"))
-                child_name = str(child.get("name") or "").strip()
+                child_name = str(child.get("name") or "")
                 child_type = _type_value(child.get("type"))
-                slug = child_type in SLUG_TYPES
-                final_name = (normalize_channel_name(child_name, keep_emoji=True)
-                              if slug else child_name)
+                final_name = child_name
                 child_id = str(child.get("channelId") or "")
                 if child_action == "create":
-                    valid = bool(final_name and child.get("type"))
+                    valid = bool(final_name.strip() and child.get("type"))
                 else:
                     valid = child_action in ACTIONS and bool(child_id)
                 ops.append({
@@ -313,14 +310,12 @@ class BulkChannelsTab(tk.Frame):
             if not isinstance(child, dict):
                 continue
             action = str(child.get("action") or ("view" if snapshot else "create"))
-            name = str(child.get("name") or "").strip()
+            name = str(child.get("name") or "")
             type_value = _type_value(child.get("type"))
-            slug = type_value in SLUG_TYPES
-            final_name = (normalize_channel_name(name, keep_emoji=True)
-                          if slug else name)
+            final_name = name
             channel_id = str(child.get("channelId") or "")
             if action == "create":
-                valid = bool(final_name and child.get("type"))
+                valid = bool(final_name.strip() and child.get("type"))
             else:
                 valid = action in ACTIONS and bool(channel_id)
             ops.append({
@@ -345,6 +340,7 @@ class BulkChannelsTab(tk.Frame):
         self._running = True
         self._index = 0
         self._created_categories = {}
+        self._runtime_channels: dict[str, Any] = {}
         self.text.configure(state="disabled")
         self._update_buttons()
         self.progress.configure(maximum=max(1, len(self._ops)), value=0)
@@ -377,11 +373,14 @@ class BulkChannelsTab(tk.Frame):
         fields = self._fields_for(op, self._created_categories)
         if op["action"] == "create":
             created = client.create_channel(guild_id, fields)
+            self._runtime_channels[str(created.id)] = created
             if op["kind"] == "Categoría":
                 self._created_categories[op["channel_id"]] = created.id
             return created
         if op["action"] == "update":
-            return client.update_channel(op["channel_id"], fields)
+            updated = client.update_channel(op["channel_id"], fields)
+            self._runtime_channels[str(updated.id)] = updated
+            return updated
         client.delete_channel(op["channel_id"])
         return None
 
@@ -430,10 +429,12 @@ class BulkChannelsTab(tk.Frame):
         if op["action"] == "update" and not raw.get("name"):
             fields.pop("name", None)
         if op["kind"] == "Categoría":
-            fields["type"] = 4
+            if op["action"] == "create":
+                fields["type"] = 4
             parent = None
         else:
-            fields["type"] = op["type"]
+            if op["action"] == "create":
+                fields["type"] = op["type"]
             parent = op["parent_id"]
             if parent and str(parent).startswith("__"):
                 parent = created_categories.get(str(parent))
@@ -441,7 +442,9 @@ class BulkChannelsTab(tk.Frame):
                 parent = raw.get("parentId")
                 if parent and str(parent).startswith("__"):
                     parent = created_categories.get(str(parent))
-            if parent:
+            if "parentId" in raw and parent is None:
+                fields["parent_id"] = None
+            elif parent:
                 fields["parent_id"] = parent
             settings = raw.get("settings") or {}
             if "topic" in settings:
@@ -462,20 +465,24 @@ class BulkChannelsTab(tk.Frame):
         sync = bool(raw.get("syncWithCategory"))
         existing = self._existing_channel(op)
         if sync and parent:
-            category = next((c for c in self.page._channels if c.id == parent), None)
+            category = (self._runtime_channels.get(str(parent))
+                        or next((c for c in self.page._channels
+                                 if c.id == str(parent)), None))
             if category is not None:
                 fields["permission_overwrites"] = [
                     {"id": ow.id, "type": ow.type,
                      "allow": str(ow.allow), "deny": str(ow.deny)}
                     for ow in category.permission_overwrites]
-        elif raw.get("permissions") is not None or op["action"] == "update":            fields["permission_overwrites"] = _overwrites(
+        elif raw.get("permissions") is not None or op["action"] == "update":
+            fields["permission_overwrites"] = _overwrites(
                 raw.get("permissions") or {}, existing,
                 self.app.guild.everyone_role.id if self.app.guild.everyone_role else None)
         return fields
 
     def _existing_channel(self, op: dict):
         target = op.get("channel_id") or ""
-        return next((c for c in self.page._channels if c.id == str(target)), None)
+        return (self._runtime_channels.get(str(target))
+                or next((c for c in self.page._channels if c.id == str(target)), None))
 
     def _execution_done(self, count: int) -> None:
         self._running = False

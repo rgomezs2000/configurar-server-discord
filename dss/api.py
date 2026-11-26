@@ -288,7 +288,15 @@ class DiscordClient:
         if user_id:
             params["user_id"] = user_id
         raw = self.http.get(f"/guilds/{guild_id}/audit-logs", params=params) or {}
-        return [AuditEntry.from_dict(item) for item in raw.get("audit_log_entries") or []]
+        users = {str(user.get("id")): User.from_dict(user)
+                 for user in (raw.get("users") or []) if isinstance(user, dict)}
+        entries: list[AuditEntry] = []
+        for item in raw.get("audit_log_entries") or []:
+            entry = AuditEntry.from_dict(item)
+            entry.actor = users.get(str(entry.user_id)) if entry.user_id else None
+            entry.target = users.get(str(entry.target_id)) if entry.target_id else None
+            entries.append(entry)
+        return entries
 
     # ------------------------------------------------------------------ #
     # Emojis

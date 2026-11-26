@@ -4,12 +4,14 @@ from __future__ import annotations
 import json
 import queue
 import tkinter as tk
+import webbrowser
 from tkinter import ttk
 from typing import Any
 
 from ...constants import (AUDIT_CATEGORIES, DELETE_MESSAGE_WINDOWS, audit_action_category)
 from ...gateway import DiscordGateway
 from ...models import (AuditEntry, Ban, Message, fmt_date, fmt_datetime)
+from ...util import human_size
 from ..emoji_picker import EmojiPicker
 from ..theme import C
 from ..widgets import (Card, ConfirmDialog, EmptyState, Field, Modal, PageHeader,
@@ -195,6 +197,7 @@ class BansTab(tk.Frame):
         self.page = page
         self.loaded = False
         self._bans: list[Ban] = []
+        self._moderators: dict[str, str] = {}
         can_ban = app.can("BAN_MEMBERS")
 
         toolbar = tk.Frame(self, bg=C.CONTENT)
@@ -221,6 +224,7 @@ class BansTab(tk.Frame):
 
         columns = [TableColumn("user", "Usuario", 220, stretch=True),
                    TableColumn("id", "ID", 190),
+                   TableColumn("moderator", "Baneado por", 160),
                    TableColumn("reason", "Motivo", 340, stretch=True)]
         self.table = Table(self, columns, height=16, theme=app.theme,
                            empty_text="No hay usuarios baneados.")
@@ -230,11 +234,25 @@ class BansTab(tk.Frame):
         self.loaded = True
         client = self.app.client
         guild_id = self.app.guild.id
-        self.page.run(lambda: client.list_bans(guild_id, limit=1000), self._done,
-                      self._failed)
 
-    def _done(self, bans: list[Ban]) -> None:
-        self._bans = bans
+        def work() -> tuple[list[Ban], dict[str, str]]:
+            bans = client.list_bans(guild_id, limit=1000)
+            moderators: dict[str, str] = {}
+            try:
+                logs = client.list_audit_logs(guild_id, limit=100,
+                                              action_type=22)
+            except Exception:  # noqa: BLE001 - el historial es opcional
+                logs = []
+            for entry in logs:
+                if entry.target_id and entry.actor:
+                    moderators.setdefault(str(entry.target_id),
+                                          entry.actor.display_name)
+            return bans, moderators
+
+        self.page.run(work, self._done, self._failed)
+
+    def _done(self, result: tuple[list[Ban], dict[str, str]]) -> None:
+        self._bans, self._moderators = result
         self._render()
 
     def _failed(self, error: BaseException) -> None:
@@ -253,6 +271,7 @@ class BansTab(tk.Frame):
             "_id": ban.user.id,
             "user": ban.user.display_name + (" (bot)" if ban.user.bot else ""),
             "id": ban.user.id,
+            "moderator": self._moderators.get(ban.user.id, "—"),
             "reason": ban.reason or "—",
             "_raw": {"user": ban.user.display_name, "reason": ban.reason or ""},
         } for ban in bans]
@@ -423,6 +442,158 @@ class AuditTab(tk.Frame):
 # Mensajes
 # --------------------------------------------------------------------------- #
 
+class MessageDetailWindow(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, app: Any, page: ModerationPage,
+                 channel_id: str, message: Message, on_change: Any):
+        super().__init__(parent)
+        self.app = app
+        self.page = page
+        self.channel_id = channel_id
+        self.message = message
+        self.on_change = on_change
+        self.title(f"Mensaje de {message.author.display_name}")
+        self.geometry("760x620")
+        self.configure(bg=C.CONTENT)
+        self.transient(parent.winfo_toplevel())
+        self._build()
+
+    def _build(self) -> None:
+        header = tk.Frame(self, bg=C.CONTENT)
+        header.pack(fill="x", padx=18, pady=(14, 6))
+        tk.Label(header, text=f"Mensaje de {self.message.author.display_name}",
+                 bg=C.CONTENT, fg=C.TEXT, font=self.app.theme.font(13, "bold"),
+                 anchor="w").pack(side="left")
+        ttk.Button(header, text="Cerrar", style="Small.TButton",
+                   command=self.destroy).pack(side="right")
+        info = tk.Frame(self, bg=C.CARD)
+        info.pack(fill="x", padx=18, pady=(0, 8))
+        tk.Label(info, text=f"ID: {self.message.id}", bg=C.CARD, fg=C.MUTED,
+                 font=self.app.theme.font(8), anchor="w").pack(
+            fill="x", padx=10, pady=(6, 0))
+        tk.Label(info, text=f"Enviado: {fmt_datetime(self.message.timestamp)}",
+                 bg=C.CARD, fg=C.MUTED, font=self.app.theme.font(8),
+                 anchor="w").pack(fill="x", padx=10)
+        self.pin_label = tk.Label(
+            info, text="Fijado" if self.message.pinned else "No fijado",
+            bg=C.CARD, fg=C.GREEN if self.message.pinned else C.MUTED,
+            font=self.app.theme.font(8, "bold"), anchor="w")
+        self.pin_label.pack(fill="x", padx=10, pady=(0, 6))
+
+        tk.Label(self, text="CONTENIDO", bg=C.CONTENT, fg=C.MUTED,
+                 font=self.app.theme.font(8, "bold"), anchor="w").pack(
+            fill="x", padx=18)
+        self.content = tk.Text(self, bg=C.INPUT, fg=C.TEXT, relief="flat",
+                               bd=0, wrap="word", height=9,
+                               font=self.app.theme.font(9), padx=10, pady=8)
+        self.content.pack(fill="both", expand=True, padx=18, pady=(2, 8))
+
+        if self.message.embeds:
+            tk.Label(self, text="EMBEDS", bg=C.CONTENT, fg=C.MUTED,
+                     font=self.app.theme.font(8, "bold"), anchor="w").pack(
+                fill="x", padx=18)
+            embeds = tk.Text(self, bg=C.INPUT, fg=C.TEXT, relief="flat", bd=0,
+                             wrap="word", height=5,
+                             font=(self.app.theme.mono_family, 8), padx=8, pady=6)
+            embeds.pack(fill="x", padx=18, pady=(2, 8))
+            embeds.insert("1.0", json.dumps(self.message.embeds, indent=2,
+                                             ensure_ascii=False, default=str))
+            embeds.configure(state="disabled")
+
+        tk.Label(self, text="ADJUNTOS", bg=C.CONTENT, fg=C.MUTED,
+                 font=self.app.theme.font(8, "bold"), anchor="w").pack(
+            fill="x", padx=18)
+        self.attachments = tk.Frame(self, bg=C.CARD)
+        self.attachments.pack(fill="x", padx=18, pady=(2, 8))
+
+        actions = tk.Frame(self, bg=C.CONTENT)
+        actions.pack(fill="x", padx=18, pady=(0, 14))
+        self.pin_button = ttk.Button(actions, text="", style="Small.TButton",
+                                     command=self._toggle_pin)
+        self.pin_button.pack(side="left")
+        ttk.Button(actions, text="Actualizar", style="Small.TButton",
+                   command=self._refresh).pack(side="left", padx=(6, 0))
+        ttk.Button(actions, text="Eliminar mensaje", style="SmallDanger.TButton",
+                   command=self._delete).pack(side="left", padx=(6, 0))
+        self.status = tk.Label(actions, text="", bg=C.CONTENT, fg=C.MUTED,
+                               font=self.app.theme.font(8), anchor="e")
+        self.status.pack(side="right")
+        self._render()
+
+    def _render(self) -> None:
+        self.content.configure(state="normal")
+        self.content.delete("1.0", "end")
+        self.content.insert("1.0", self.message.content or
+                            "(sin texto visible para el bot)")
+        self.content.configure(state="disabled")
+        for child in self.attachments.winfo_children():
+            child.destroy()
+        if not self.message.attachments:
+            tk.Label(self.attachments, text="Sin adjuntos", bg=C.CARD,
+                     fg=C.FAINT, font=self.app.theme.font(8), anchor="w").pack(
+                fill="x", padx=8, pady=6)
+        for attachment in self.message.attachments:
+            row = tk.Frame(self.attachments, bg=C.CARD)
+            row.pack(fill="x", padx=8, pady=2)
+            tk.Label(row, text=f"{attachment.filename}  ({human_size(attachment.size)})",
+                     bg=C.CARD, fg=C.DIM, font=self.app.theme.font(8),
+                     anchor="w").pack(side="left", fill="x", expand=True)
+            if attachment.url:
+                ttk.Button(row, text="Abrir", style="Small.TButton",
+                           command=lambda url=attachment.url:
+                           webbrowser.open(url)).pack(side="right")
+        self.pin_label.configure(
+            text="Fijado" if self.message.pinned else "No fijado",
+            fg=C.GREEN if self.message.pinned else C.MUTED)
+        self.pin_button.configure(
+            text="Desfijar" if self.message.pinned else "Fijar")
+
+    def _toggle_pin(self) -> None:
+        client = self.app.client
+        channel_id = self.channel_id
+        message_id = self.message.id
+
+        def work() -> None:
+            if self.message.pinned:
+                client.unpin_message(channel_id, message_id)
+            else:
+                client.pin_message(channel_id, message_id)
+
+        def done(_result: Any) -> None:
+            self.message.pinned = not self.message.pinned
+            self._render()
+            self.on_change()
+
+        self.page.run(work, done)
+
+    def _delete(self) -> None:
+        dialog = ConfirmDialog(
+            self, "Eliminar mensaje",
+            "Se eliminará este mensaje del canal. Esta acción no se puede deshacer.",
+            confirm_text="Eliminar mensaje", danger=True, theme=self.app.theme)
+        if not dialog.show():
+            return
+
+        def done(_result: Any) -> None:
+            self.destroy()
+            self.on_change()
+
+        self.page.run(lambda: self.app.client.delete_message(
+            self.channel_id, self.message.id), done)
+
+    def _refresh(self) -> None:
+        def done(messages: list[Message]) -> None:
+            found = next((m for m in messages if m.id == self.message.id), None)
+            if found is None:
+                self.status.configure(text="El mensaje ya no existe.", fg=C.RED)
+                return
+            self.message = found
+            self._render()
+            self.status.configure(text="Actualizado.", fg=C.GREEN)
+
+        self.page.run(lambda: self.app.client.list_messages(
+            self.channel_id, limit=50), done)
+
+
 class MessagesTab(tk.Frame):
     def __init__(self, master: tk.Misc, app: Any, page: ModerationPage):
         super().__init__(master, bg=C.CONTENT)
@@ -469,6 +640,22 @@ class MessagesTab(tk.Frame):
         self.table.pack(fill="both", expand=True)
         self.table.tree.bind("<<TreeviewSelect>>",
                              lambda _e: self._update_pin_button())
+        self._msg_anchor: str | None = None
+        self.table.tree.bind("<ButtonPress-1>", self._message_press)
+        self.table.tree.bind("<Shift-Up>", lambda _e: self._message_extend(-1))
+        self.table.tree.bind("<Shift-Down>", lambda _e: self._message_extend(1))
+        self.table.tree.bind("<Shift-Prior>", lambda _e: self._message_extend(-15))
+        self.table.tree.bind("<Shift-Next>", lambda _e: self._message_extend(15))
+        self.table.tree.bind("<Delete>", lambda _e: self._purge())
+        self.table.tree.bind("<Double-1>", self._open_detail)
+        self.table.tree.unbind("<Button-3>")
+        self.table.tree.bind("<Button-3>", self._message_context)
+        self._message_menu = tk.Menu(self, tearoff=0, bg=C.CARD, fg=C.TEXT,
+                                     activebackground=C.ACCENT_SOFT,
+                                     activeforeground=C.TEXT)
+        self._message_menu.add_command(label="Fijar", command=self._toggle_pin)
+        self._message_menu.add_command(label="Eliminar mensajes seleccionados",
+                                       command=self._purge)
 
         tk.Label(self, text="Los mensajes se envían como el bot, no como tu cuenta.",
                  bg=C.CARD, fg=C.FAINT, font=self.app.theme.font(8),
@@ -489,6 +676,96 @@ class MessagesTab(tk.Frame):
         if not self.can_send:
             self.composer.configure(state="readonly")
             self.send_button.configure(state="disabled")
+
+    def _open_detail(self, event: tk.Event) -> None:
+        row_id = self.table.tree.identify_row(event.y)
+        if not row_id:
+            return
+        row = next((item for item in self.table._rows
+                    if str(item.get("_id")) == row_id), None)
+        if row is None or row.get("_message") is None:
+            return
+        MessageDetailWindow(self, self.app, self.page, self._channel_id,
+                            row["_message"], self.load)
+
+    def _message_press(self, event: tk.Event) -> str | None:
+        row_id = self.table.tree.identify_row(event.y)
+        if not row_id:
+            return None
+        ctrl = bool(event.state & 0x0004)
+        shift = bool(event.state & 0x0001)
+        if ctrl:
+            selected = set(self.table.tree.selection())
+            if row_id in selected:
+                selected.discard(row_id)
+            else:
+                selected.add(row_id)
+            self._message_set_selection(selected)
+            self.table.tree.focus(row_id)
+            return "break"
+        if shift:
+            selected = set(self.table.tree.selection())
+            if row_id in selected:
+                selected.discard(row_id)
+                self._message_set_selection(selected)
+                return "break"
+            rows = list(self.table.tree.get_children())
+            anchor = self._msg_anchor if self._msg_anchor in rows else row_id
+            low, high = sorted((rows.index(anchor), rows.index(row_id)))
+            self._message_set_selection(set(rows[low:high + 1]))
+            self.table.tree.focus(row_id)
+            return "break"
+        self._msg_anchor = row_id
+        return None
+
+    def _message_set_selection(self, selected: set[str]) -> None:
+        rows = list(self.table.tree.get_children())
+        ordered = [row for row in rows if row in selected]
+        if ordered:
+            self.table.tree.selection_set(*ordered)
+        else:
+            current = self.table.tree.selection()
+            if current:
+                self.table.tree.selection_remove(*current)
+
+    def _message_extend(self, delta: int) -> str:
+        rows = list(self.table.tree.get_children())
+        if not rows:
+            return "break"
+        focus = self.table.tree.focus()
+        if focus not in rows:
+            focus = self._msg_anchor if self._msg_anchor in rows else rows[0]
+        anchor = self._msg_anchor if self._msg_anchor in rows else focus
+        target = max(0, min(rows.index(focus) + delta, len(rows) - 1))
+        low, high = sorted((rows.index(anchor), target))
+        self._message_set_selection(set(rows[low:high + 1]))
+        self.table.tree.focus(rows[target])
+        self.table.tree.see(rows[target])
+        return "break"
+
+    def _message_context(self, event: tk.Event) -> None:
+        row_id = self.table.tree.identify_row(event.y)
+        if not row_id:
+            return
+        if row_id not in self.table.tree.selection():
+            self.table.tree.selection_set(row_id)
+        self.table.tree.focus(row_id)
+        self._msg_anchor = row_id
+        rows = self.table.selected_rows()
+        pinned = bool(rows) and all(
+            bool((row.get("_message") and row["_message"].pinned)) for row in rows)
+        self._message_menu.entryconfigure(
+            0, label="Desfijar" if pinned else "Fijar")
+        try:
+            self._message_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self._message_menu.grab_release()
+            except tk.TclError:
+                pass
+
+
+        EmojiPicker(self, self.app, self.emoji_button, self._insert_emoji)
 
     def _open_emoji_picker(self) -> None:
         EmojiPicker(self, self.app, self.emoji_button, self._insert_emoji)
